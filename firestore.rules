@@ -1,0 +1,93 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.uid == request.auth.uid 
+          && data.role in ['donor', 'ngo', 'volunteer', 'user']
+          && (data.email is string && data.email.size() <= 128);
+      }
+
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && (
+        resource.data.get('uid', '') == request.auth.uid || 
+        resource.data.get('role', '') in ['volunteer', 'ngo']
+      );
+
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) 
+        && (incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'orgName', 'location', 'updatedAt', 'role', 'email', 'uid', 'createdAt', 'liveLocation']))
+        && (
+          (incoming().updatedAt == request.time) || 
+          (incoming().diff(existing()).affectedKeys().hasOnly(['liveLocation']) && incoming().liveLocation.updatedAt == request.time)
+        );
+    }
+
+    // Donations Collection
+    match /donations/{donationId} {
+      function isValidDonation(data) {
+        return data.foodName is string && data.foodName.size() <= 100
+          && data.donorId is string
+          && data.status in ['available', 'claimed', 'picked_up', 'delivered']
+          && data.freshness is number && data.freshness >= 0 && data.freshness <= 100
+          && data.quantity is string
+          && data.whenMade is string
+          && data.contact is string
+          && data.address is string;
+      }
+
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && (
+        resource.data.get('donorId', '') == request.auth.uid ||
+        resource.data.get('ngoId', '') == request.auth.uid ||
+        resource.data.get('volunteerId', '') == request.auth.uid ||
+        resource.data.get('status', '') in ['available', 'claimed', 'picked_up', 'delivered']
+      );
+      
+      allow create: if isSignedIn() 
+        && isValidDonation(incoming())
+        && incoming().donorId == request.auth.uid
+        && incoming().createdAt == request.time;
+
+      allow update: if isSignedIn() && isValidDonation(incoming()) && (
+        // Identity checks / Owner updates
+        (resource.data.get('donorId', '') == request.auth.uid) ||
+        (resource.data.get('ngoId', '') == request.auth.uid) ||
+        (resource.data.get('volunteerId', '') == request.auth.uid) ||
+        // Allowing NGOs to claim
+        (resource.data.get('status', '') == 'available' && incoming().status == 'claimed' && incoming().ngoId == request.auth.uid) ||
+        // Allowing Volunteers to pick up
+        (resource.data.get('status', '') == 'claimed' && incoming().status == 'picked_up' && incoming().volunteerId == request.auth.uid) ||
+        // Allowing Volunteers to deliver
+        (resource.data.get('status', '') == 'picked_up' && incoming().status == 'delivered' && resource.data.get('volunteerId', '') == request.auth.uid)
+      ) && incoming().updatedAt == request.time;
+    }
+  }
+}
